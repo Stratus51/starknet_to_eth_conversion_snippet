@@ -1868,6 +1868,8 @@ name = "kakarot_snippet"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus 0.5.4",
+ "alloy-primitives",
+ "num-bigint",
  "reth-primitives",
  "starknet",
  "starknet_api",
