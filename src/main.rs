@@ -1,10 +1,10 @@
-use alloy_consensus::Header;
+use alloy_consensus::{transaction::TxEnvelope, Header};
 use alloy_primitives::{Parity, Uint};
-use reth_primitives::TransactionSigned;
+use reth_primitives::{Transaction as EthTransaction, TransactionSigned};
 use starknet::{
     core::types::{
         BlockId, BlockWithReceipts, Felt, InvokeTransaction, InvokeTransactionReceipt,
-        InvokeTransactionV1, MaybePendingBlockWithReceipts, Transaction, TransactionReceipt,
+        InvokeTransactionV1, MaybePendingBlockWithReceipts, TransactionReceipt,
         TransactionWithReceipt,
     },
     providers::{
@@ -51,6 +51,27 @@ async fn convert_block(block: BlockWithReceipts) -> EthBlockParts {
 
     // XXX Pull ref block to debug
     let ref_block = get_kakarot_block(TARGET_BLOCK).await;
+    println!(
+        "kakarot_block: nb_transactions = {}",
+        ref_block.transactions.len()
+    );
+    if let alloy_rpc_types_eth::BlockTransactions::Full(list) = &ref_block.transactions {
+        for transaction in list {
+            let transaction = transaction.clone();
+            let tx_envelope = TxEnvelope::try_from(transaction).unwrap();
+            use alloy_rlp::Encodable;
+            let mut buf = vec![];
+            println!("ty: {:?}", tx_envelope.tx_type());
+            match tx_envelope {
+                TxEnvelope::Eip2930(tx) => tx.tx().encode(&mut buf),
+                TxEnvelope::Eip1559(tx) => tx.tx().encode(&mut buf),
+                tx => panic!("Bad TX: {tx:#?}"),
+            }
+            println!("-> {}", hex::encode_upper(&buf))
+        }
+    } else {
+        panic!();
+    }
 
     // let mut transactions = vec![];
     let mut cumulative_gas_used = Felt::ZERO;
@@ -73,6 +94,7 @@ async fn convert_block(block: BlockWithReceipts) -> EthBlockParts {
         // TODO Build receipt trie
         // TODO Build transaction trie
     }
+    println!("Found {} transactions", transactions.len());
 
     // TODO Improvise root trie for example
     // TODO Build header
@@ -86,6 +108,7 @@ async fn convert_block(block: BlockWithReceipts) -> EthBlockParts {
 fn is_kakarot_transaction(
     raw: &TransactionWithReceipt,
 ) -> Option<(&InvokeTransactionV1, &InvokeTransactionReceipt)> {
+    use starknet::core::types::Transaction;
     if let (
         Transaction::Invoke(InvokeTransaction::V1(transaction)),
         TransactionReceipt::Invoke(receipt),
@@ -127,19 +150,33 @@ fn convert_transaction(transaction: &InvokeTransactionV1) -> Option<TransactionS
     let v = Parity::Parity(v != Felt::ZERO);
     let signature = reth_primitives::Signature::new(r, s, v);
 
-    let calldata_without_signature = &transaction.calldata[..transaction.calldata.len() - 6];
-    let new_format_bytes: Vec<u8> = calldata_without_signature[7..]
+    let calldata_without_signature = &transaction.calldata[8..transaction.calldata.len() - 6];
+    let data_len: usize = call_data.calldata_len.to_biguint().try_into().unwrap();
+    let mut nb_felts = data_len / 32;
+    let mut remaining_bytes = data_len % 32;
+    if remaining_bytes == 0 {
+        remaining_bytes = 32;
+        nb_felts += 1;
+    }
+    println!("remaining_bytes: {remaining_bytes}");
+    let data = &calldata_without_signature[7..][..nb_felts + 1];
+    let mut new_format_bytes: Vec<u8> = data[..data.len() - 1]
         .iter()
         .map(|felt| felt.to_bytes_be())
         .collect::<Vec<_>>()
         .concat();
+    let offset = 32 - remaining_bytes;
+    let last_felt = calldata_without_signature.last().unwrap();
+    new_format_bytes.extend(&last_felt.to_bytes_be()[offset..]);
+    assert_eq!(new_format_bytes.len(), data_len);
 
-    // TODO Build Ethereum transaction
-    //      Find a parser for the transaction binary encoding
-    use reth_codecs::Compact;
-    use serde::Deserialize;
-    // let transaction = reth_primitives::Transaction::deserialize(&new_format_bytes).unwrap();
-    let transaction = reth_primitives::Transaction::from_compact(&new_format_bytes, 0).0;
+    println!("data_len: {data_len}");
+    let new_format_bytes = &new_format_bytes[..];
+    println!("Extracted data: {}", hex::encode_upper(new_format_bytes));
+
+    // Parse transaction
+    let transaction = parse_transaction(new_format_bytes)?;
+    println!("transaction: {transaction:#?}");
 
     // Return
     Some(TransactionSigned::from_transaction_and_signature(
@@ -148,32 +185,55 @@ fn convert_transaction(transaction: &InvokeTransactionV1) -> Option<TransactionS
     ))
 }
 
+fn parse_transaction(data: &[u8]) -> Option<EthTransaction> {
+    use alloy_consensus::transaction::{TxEip1559, TxEip2930, TxLegacy, TxType};
+    use alloy_rlp::Decodable;
+
+    const TX_TYPE_EIP2930: u8 = TxType::Eip2930 as u8;
+    const TX_TYPE_EIP1559: u8 = TxType::Eip1559 as u8;
+
+    let tx_type = data[1];
+    let mut data_ptr = &data[2..];
+    if tx_type < 0x7f {
+        println!("tx_type: {}", tx_type);
+        match tx_type {
+            TX_TYPE_EIP2930 => TxEip2930::decode(&mut data_ptr).map(|tx| tx.into()).ok(),
+            TX_TYPE_EIP1559 => {
+                println!("Parsing TxEip1559: {}", hex::encode_upper(data_ptr));
+                TxEip1559::decode(&mut data_ptr).map(|tx| tx.into()).ok()
+            }
+            _ => None,
+        }
+    } else {
+        TxLegacy::decode(&mut data_ptr).map(|tx| tx.into()).ok()
+    }
+}
+
 // From https://github.com/kkrt-labs/kakarot-rpc/blob/15da170828f3281721a4c2995a47d64636d5607a/indexer/src/types/transaction.ts#L289
 // [call_array_len, to, selector, data_offset, data_len, calldata_len, calldata, signature_len, signature]
 struct CallData {
-    call_len: Felt,
-    to: Felt,
-    selector: Felt,
-    call_data_len: Felt,
-    outside_execution: CallDataOutsideExecution,
-
+    // call_len: Felt,
+    // to: Felt,
+    // selector: Felt,
+    // call_data_len: Felt,
+    // outside_execution: CallDataOutsideExecution,
     call_array_len: Felt,
     // to2: Felt,
     // selector2: Felt,
     // data_offset: Felt,
-    data_len: Felt,
-    // calldata_len: Felt,
+    // data_len: Felt,
+    calldata_len: Felt,
     // call_data: Vec<Felt>,
     // signature_len: Felt
     signature: Vec<Felt>,
 }
 
-struct CallDataOutsideExecution {
-    caller: Felt,
-    nonce: Felt,
-    after: Felt,
-    before: Felt,
-}
+// struct CallDataOutsideExecution {
+//     caller: Felt,
+//     nonce: Felt,
+//     after: Felt,
+//     before: Felt,
+// }
 
 impl CallData {
     fn parse(raw: &[Felt]) -> Option<Self> {
@@ -186,23 +246,22 @@ impl CallData {
         let signature = raw[sig_offset + 1..].to_vec();
         assert_eq!(usize_signature_len, signature.len());
         Some(Self {
-            call_len: raw[0],
-            to: raw[1],
-            selector: raw[2],
-            call_data_len: raw[3],
-            outside_execution: CallDataOutsideExecution {
-                caller: raw[4],
-                nonce: raw[5],
-                after: raw[6],
-                before: raw[7],
-            },
-
+            // call_len: raw[0],
+            // to: raw[1],
+            // selector: raw[2],
+            // call_data_len: raw[3],
+            // outside_execution: CallDataOutsideExecution {
+            //     caller: raw[4],
+            //     nonce: raw[5],
+            //     after: raw[6],
+            //     before: raw[7],
+            // },
             call_array_len: raw[8],
             // to2: raw[9],
             // selector2: raw[10],
             // data_offset: raw[11],
-            data_len,
-            // calldata_len: raw[13],
+            // data_len,
+            calldata_len: raw[14],
             // call_data: ,
             signature,
         })
