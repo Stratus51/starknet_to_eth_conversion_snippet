@@ -8,13 +8,16 @@ alloy-consensus = "0.4.2"
 alloy-primitives = { version = "0", features = ["rlp"] } # Pull same version as alloy consensus
 alloy-rlp = "0" # Pull same version as alloy consensus
 alloy-eips = "0.4.2" # Pull same version as alloy consensus
+alloy-rpc-types-eth = "0.4.2" # Pull same version reth consensus debug client
+clap = "4.5"
+env_logger = "0.11"
+hex = "0.4.3"
+log = "0.4"
+num-bigint = "0" # Pull same version as starknet
 reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.1.0", features = ["reth-codec"] }
 reth-codecs = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.1.0" } # Pull same version as reth-primitives
 reth-consensus-debug-client = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.1.0" }
-alloy-rpc-types-eth = "0.4.2" # Pull same version reth consensus debug client
+serde = "1"
 starknet = { git = "https://github.com/xJonathanLEI/starknet-rs" } # This is the README recommended way: no branch, no tag ...
 starknet_api = "0.11"
 tokio = { version = "1.0", features = [ "full" ] }
-num-bigint = "0" # Pull same version as starknet
-serde = "1"
-hex = "0.4.3"
